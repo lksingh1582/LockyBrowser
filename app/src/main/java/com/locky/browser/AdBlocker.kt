@@ -7,7 +7,8 @@ import java.io.ByteArrayInputStream
 
 /** Domain-based ad/tracker blocker plus cosmetic CSS for leftover ad slots. */
 class AdBlocker(context: Context) {
-    private val ads = load(context, "ads.txt")
+    // ads_extra.txt is a large list fetched by the CI build; it is optional (missing in local builds).
+    private val ads = load(context, "ads.txt").also { it.addAll(loadOptional(context, "ads_extra.txt")) }
     private val trackers = load(context, "trackers.txt")
 
     private fun load(context: Context, name: String): HashSet<String> =
@@ -16,6 +17,15 @@ class AdBlocker(context: Context) {
                 .filter { it.isNotEmpty() && !it.startsWith("#") }
                 .toHashSet()
         }
+
+    private fun loadOptional(context: Context, name: String): Set<String> =
+        try { load(context, name) } catch (e: java.io.IOException) { emptySet() }
+
+    /** True for domain endings that are almost only used by throwaway ad/scam redirect hosts. */
+    fun isJunkHost(host: String?): Boolean {
+        val tld = host?.lowercase()?.substringAfterLast('.') ?: return false
+        return tld in junkTlds
+    }
 
     fun isBlocked(uri: Uri, blockAds: Boolean, blockTrackers: Boolean): Boolean {
         val host = uri.host?.lowercase() ?: return false
@@ -35,6 +45,31 @@ class AdBlocker(context: Context) {
     }
 
     companion object {
+        private val junkTlds = setOf("cfd", "qpon", "sbs", "cyou", "icu", "click", "monster")
+
+        /**
+         * Runs at document start in every page: stops window.open() popups and removes invisible
+         * full-screen overlays that steal taps (the classic "every click opens an ad" trick).
+         */
+        fun pageScript(blockOpen: Boolean, removeOverlays: Boolean): String {
+            val sb = StringBuilder("(function(){if(window.__lk)return;window.__lk=1;")
+            if (blockOpen) sb.append(OPEN_JS)
+            if (removeOverlays) sb.append(SWEEP_JS)
+            return sb.append("})();").toString()
+        }
+
+        private const val OPEN_JS = "try{window.open=function(){return null;};}catch(e){}"
+
+        private const val SWEEP_JS = """function sweep(){try{var b=document.body;if(!b)return;var W=innerWidth,H=innerHeight;
+Array.prototype.slice.call(b.children).forEach(function(el){
+var t=el.tagName;if(t==='SCRIPT'||t==='STYLE'||t==='LINK')return;
+var cs=getComputedStyle(el);if(cs.position!=='fixed'&&cs.position!=='absolute')return;
+var r=el.getBoundingClientRect();if(r.width<W*0.8||r.height<H*0.8)return;
+if((parseInt(cs.zIndex)||0)<100)return;
+var empty=((el.innerText||'').trim()==='')&&el.querySelectorAll('*').length<=1;
+if(parseFloat(cs.opacity)<0.1||empty){el.remove();}});}catch(e){}}
+setInterval(sweep,1000);"""
+
         fun emptyResponse() = WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
 
         /** Extra resources skipped in Data saver mode: video and web fonts. */

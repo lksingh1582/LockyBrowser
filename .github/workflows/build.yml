@@ -16,6 +16,14 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+      - name: Fetch large ad blocklist
+        run: |
+          mkdir -p app/src/main/assets
+          {
+            curl -fsSL https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts | awk '$1=="0.0.0.0" {print tolower($2)}' || true
+            curl -fsSL "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=nohtml&showintro=0&mimetype=plaintext" || true
+          } | tr -d '\r' | grep -E '^[a-z0-9._-]+\.[a-z]{2,}$' | sort -u > app/src/main/assets/ads_extra.txt || true
+          wc -l app/src/main/assets/ads_extra.txt
       - name: Build debug APK
         run: ./gradlew --no-daemon assembleDebug
       - uses: actions/upload-artifact@v4

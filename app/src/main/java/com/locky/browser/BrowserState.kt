@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
+import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
@@ -26,6 +28,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 
 class BrowserTab(val id: Int, val isPrivate: Boolean) {
@@ -41,6 +45,10 @@ class BrowserTab(val id: Int, val isPrivate: Boolean) {
     var warning by mutableStateOf<String?>(null)
     var pendingUrl: String? = null
     val allowedHosts = HashSet<String>()
+
+    /** Last finger-up on the page: when, and the link under it (null if the tap was not on a link). */
+    var tapTime = 0L
+    var tapLink: String? = null
 
     /** Short banner such as "Redirect blocked"; noticeUrl (if set) lets the user allow it. */
     var notice by mutableStateOf<String?>(null)
@@ -225,6 +233,16 @@ class BrowserState(
 
     // -------------------------------------------------------------- webview
 
+    /** The link the user actually tapped within the last 2 seconds, or null if the tap was not on a link. */
+    private fun pageScriptFor(): String? {
+        val popups = settings.popupBlock.value
+        val ads = settings.adBlock.value
+        return if (popups || ads) AdBlocker.pageScript(blockOpen = popups, removeOverlays = ads) else null
+    }
+
+    private fun recentTappedLink(tab: BrowserTab): String? =
+        if (SystemClock.uptimeMillis() - tab.tapTime < 2000) tab.tapLink else null
+
     @SuppressLint("SetJavaScriptEnabled")
     @Suppress("DEPRECATION")
     private fun buildWebView(tab: BrowserTab): WebView {
@@ -249,6 +267,23 @@ class BrowserState(
         s.setSupportZoom(true)
         s.builtInZoomControls = true
         s.displayZoomControls = false
+
+        // Remember what the finger really touched, so scripts can't pretend a tap was a link click.
+        wv.setOnTouchListener { v, ev ->
+            if (ev.action == MotionEvent.ACTION_UP) {
+                val h = (v as WebView).hitTestResult
+                tab.tapTime = SystemClock.uptimeMillis()
+                tab.tapLink =
+                    if (h.type == WebView.HitTestResult.SRC_ANCHOR_TYPE || h.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) h.extra
+                    else null
+            }
+            false
+        }
+        pageScriptFor()?.let { script ->
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                WebViewCompat.addDocumentStartJavaScript(wv, script, setOf("*"))
+            }
+        }
 
         wv.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -287,12 +322,25 @@ class BrowserState(
                     }
                 }
 
-                // Redirect guard: a page that navigates the tab to another site without a user tap.
-                // (Normal server redirects such as http->https or www are marked isRedirect and allowed.)
-                if (settings.redirectGuard.value && !request.hasGesture() && !request.isRedirect && tab.url.isNotBlank()) {
+                // Never navigate to known ad servers or throwaway ad domains (also stops redirect chains into them).
+                if (settings.adBlock.value &&
+                    (adBlocker.isBlocked(uri, true, false) || adBlocker.isJunkHost(uri.host))
+                ) {
+                    tab.blockedCount++
+                    tab.notice = "Blocked ad redirect"
+                    tab.noticeUrl = null
+                    return true
+                }
+
+                // Redirect guard: moving this tab to another site is only fine if the user really tapped
+                // a link. A script firing on a tap anywhere else (the "click ad" trick) is blocked.
+                // Normal server redirects (http->https, www) are marked isRedirect and allowed.
+                if (settings.redirectGuard.value && !request.isRedirect && tab.url.isNotBlank()) {
                     val from = UrlSafety.siteOf(Uri.parse(tab.url).host)
                     val to = UrlSafety.siteOf(uri.host)
-                    if (from != to) {
+                    val tappedLink = request.hasGesture() &&
+                        recentTappedLink(tab)?.let { UrlSafety.siteOf(Uri.parse(it).host) == to } == true
+                    if (from != to && !tappedLink) {
                         tab.blockedCount++
                         tab.notice = "Blocked automatic redirect to $to"
                         tab.noticeUrl = url
@@ -350,11 +398,20 @@ class BrowserState(
             }
 
             override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
-                if (settings.popupBlock.value && !isUserGesture) {
-                    tab.blockedCount++
-                    tab.notice = "Blocked a popup"
-                    tab.noticeUrl = null
-                    return false
+                if (settings.popupBlock.value) {
+                    // Allow a new tab only for a real tap on a link to this same site (e.g. a download button).
+                    // Everything else, including "user gesture" popups from taps on the page body, is blocked.
+                    val link = recentTappedLink(tab)
+                    val linkUri = link?.let { Uri.parse(it) }
+                    val sameSite = linkUri != null &&
+                        UrlSafety.siteOf(linkUri.host) == UrlSafety.siteOf(Uri.parse(tab.url).host) &&
+                        !adBlocker.isBlocked(linkUri, true, false)
+                    if (!sameSite) {
+                        tab.blockedCount++
+                        tab.notice = "Blocked a popup"
+                        tab.noticeUrl = link
+                        return false
+                    }
                 }
                 val newTab = newTab(isPrivate = tab.isPrivate)
                 val transport = resultMsg.obj as WebView.WebViewTransport

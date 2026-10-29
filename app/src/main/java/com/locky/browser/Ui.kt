@@ -527,7 +527,7 @@ fun SettingsScreen(
         LazyColumn(Modifier.fillMaxSize()) {
             item { Header("Blocking") }
             item { Toggle("Ad & tracker blocking", "Blocks known ad and tracker servers and hides empty ad spaces.", settings.adBlock, onChanged) }
-            item { Toggle("Block popups", "Stops pages from opening new windows without a tap.", settings.popupBlock, onChanged) }
+            item { Toggle("Block popups", "Blocks pop-up tabs unless you tap a link on the same site. Some login pop-ups may need this off.", settings.popupBlock, onChanged) }
             item { Toggle("Stop auto-redirects", "Blocks pages that send you to another site without a tap. You can allow a blocked one.", settings.redirectGuard, onChanged) }
             item { Header("Data") }
             item { Toggle("Data saver", "Does not load images and blocks heavy media, saving mobile data.", settings.dataSaver, onChanged) }
